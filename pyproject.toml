@@ -1,0 +1,30 @@
+[project]
+name = "pm-playbook"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "minsearch>=0.2.0",
+    "numpy>=2.4.6",
+    "openai>=2.47.0",
+    "pandas>=3.0.5",
+    "plotly>=6.9.0",
+    "psycopg2-binary>=2.9.12",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "qdrant-client>=1.18.0",
+    "requests>=2.34.2",
+    "scikit-learn>=1.9.0",
+    "sentence-transformers>=5.6.1",
+    "sqlalchemy>=2.0.51",
+    "streamlit>=1.60.0",
+    "tiktoken>=0.13.0",
+]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "pytest>=9.1.1",
+    "ruff>=0.15.22",
+]
