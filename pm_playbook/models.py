@@ -6,6 +6,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from datetime import date
+
 
 class Episode(BaseModel):
     """
@@ -15,7 +17,7 @@ class Episode(BaseModel):
 
     guest: str
     title: str
-    publish_date: Optional[str] = None
+    publish_date: Optional[date] = None
     youtube_url: Optional[str] = None
     video_id: Optional[str] = None
 
@@ -48,7 +50,7 @@ class Chunk(BaseModel):
     guest: str
     episode_title: str
 
-    publish_date: Optional[str] = None
+    publish_date: Optional[date] = None
 
     youtube_url: Optional[str] = None
     video_id: Optional[str] = None
