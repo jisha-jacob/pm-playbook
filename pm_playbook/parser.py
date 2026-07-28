@@ -32,16 +32,12 @@ def parse_transcript(file_path: str | Path) -> Episode:
         content = f.read()
 
     if not content.startswith("---"):
-        raise ValueError(
-            f"{file_path} does not contain YAML frontmatter."
-        )
+        raise ValueError(f"{file_path} does not contain YAML frontmatter.")
 
     parts = content.split("---", maxsplit=2)
 
     if len(parts) != 3:
-        raise ValueError(
-            f"Could not parse frontmatter in {file_path}"
-        )
+        raise ValueError(f"Could not parse frontmatter in {file_path}")
 
     yaml_text = parts[1]
     transcript = parts[2].strip()
@@ -54,5 +50,6 @@ def parse_transcript(file_path: str | Path) -> Episode:
         publish_date=metadata.get("publish_date"),
         youtube_url=metadata.get("youtube_url"),
         video_id=metadata.get("video_id"),
+        transcript_path=str(file_path),
         transcript=transcript,
     )

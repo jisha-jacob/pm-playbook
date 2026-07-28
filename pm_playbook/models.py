@@ -20,7 +20,7 @@ class Episode(BaseModel):
     publish_date: Optional[date] = None
     youtube_url: Optional[str] = None
     video_id: Optional[str] = None
-
+    transcript_path: Optional[str] = None
     transcript: str
 
 

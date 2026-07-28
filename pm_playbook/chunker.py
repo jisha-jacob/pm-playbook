@@ -31,6 +31,7 @@ from pm_playbook.utils import (
     count_words,
     generate_chunk_id,
     generate_episode_id,
+    is_backchannel,
     is_sponsor_read,
     parse_timestamp,
 )
@@ -163,9 +164,7 @@ def parse_speaker_turns(
             current_start_time = parse_timestamp(match.group(1))
 
             continuation_text = clean_text(match.group(2))
-            current_text_parts = (
-                [continuation_text] if continuation_text else []
-            )
+            current_text_parts = [continuation_text] if continuation_text else []
             continue
 
         match = CONTINUATION_HHMM_RE.match(line)
@@ -176,9 +175,7 @@ def parse_speaker_turns(
             current_start_time = parse_timestamp(match.group(1))
 
             continuation_text = clean_text(match.group(2))
-            current_text_parts = (
-                [continuation_text] if continuation_text else []
-            )
+            current_text_parts = [continuation_text] if continuation_text else []
             continue
 
         # This is a normal continuation line belonging to the current turn.
@@ -235,9 +232,7 @@ def merge_short_turns(
         current_is_short = count_words(turn.text) < threshold
 
         if same_speaker and (previous_is_short or current_is_short):
-            combined_text = clean_text(
-                f"{previous.text} {turn.text}"
-            )
+            combined_text = clean_text(f"{previous.text} {turn.text}")
 
             merged[-1] = SpeakerTurn(
                 speaker_name=previous.speaker_name,
@@ -352,9 +347,7 @@ def split_long_text(
             )
             continue
 
-        would_exceed_limit = (
-            current_word_count + sentence_word_count > max_words
-        )
+        would_exceed_limit = current_word_count + sentence_word_count > max_words
 
         if current_sentences and would_exceed_limit:
             flush_current_piece()
@@ -382,6 +375,56 @@ def calculate_turn_end_time(
             return later_turn.start_time
 
     return None
+
+
+def expand_sponsor_flags(
+    chunks: Sequence[Chunk],
+    neighbor_window: int = 1,
+) -> list[Chunk]:
+    """
+    Expand sponsor flags to nearby chunks from the same speaker.
+
+    Sponsor reads frequently span multiple chunks. If a chunk is
+    detected as promotional, its immediately adjacent chunks from
+    the same speaker are also flagged.
+
+    The expansion is intentionally limited to reduce false positives.
+    """
+    if neighbor_window < 0:
+        raise ValueError("neighbor_window cannot be negative.")
+
+    sponsor_indexes = {
+        index for index, chunk in enumerate(chunks) if chunk.is_sponsor_read
+    }
+
+    expanded_indexes = set(sponsor_indexes)
+
+    for sponsor_index in sponsor_indexes:
+        sponsor_chunk = chunks[sponsor_index]
+
+        for offset in range(
+            -neighbor_window,
+            neighbor_window + 1,
+        ):
+            neighbor_index = sponsor_index + offset
+
+            if not 0 <= neighbor_index < len(chunks):
+                continue
+
+            neighbor = chunks[neighbor_index]
+
+            same_speaker = (
+                neighbor.speaker_name.strip().casefold()
+                == sponsor_chunk.speaker_name.strip().casefold()
+            )
+
+            if same_speaker:
+                expanded_indexes.add(neighbor_index)
+
+    return [
+        chunk.model_copy(update={"is_sponsor_read": index in expanded_indexes})
+        for index, chunk in enumerate(chunks)
+    ]
 
 
 def create_chunks(
@@ -413,6 +456,8 @@ def create_chunks(
     episode_id = generate_episode_id(
         guest=episode.guest,
         title=episode.title,
+        video_id=episode.video_id,
+        transcript_path=episode.transcript_path,
     )
 
     parsed_turns = parse_speaker_turns(
@@ -445,6 +490,9 @@ def create_chunks(
             if not cleaned_piece:
                 continue
 
+            if is_backchannel(cleaned_piece):
+                continue
+
             chunk_id = generate_chunk_id(
                 episode_id=episode_id,
                 chunk_position=chunk_position,
@@ -471,4 +519,4 @@ def create_chunks(
             chunks.append(chunk)
             chunk_position += 1
 
-    return chunks
+    return expand_sponsor_flags(chunks)
