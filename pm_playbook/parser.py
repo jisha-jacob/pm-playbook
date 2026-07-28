@@ -12,6 +12,27 @@ import yaml
 from pm_playbook.models import Episode
 
 
+def extract_markdown_title(transcript: str) -> str | None:
+    """
+    Extract the first level-one Markdown heading from the transcript body.
+
+    Example:
+        # The power of strategic narrative
+
+    Returns None when no H1 heading is present.
+    """
+    for line in transcript.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith("# "):
+            title = stripped.removeprefix("# ").strip()
+
+            if title:
+                return title
+
+    return None
+
+
 def parse_transcript(file_path: str | Path) -> Episode:
     """
     Parse a transcript markdown file into an Episode object.
@@ -42,11 +63,21 @@ def parse_transcript(file_path: str | Path) -> Episode:
     yaml_text = parts[1]
     transcript = parts[2].strip()
 
-    metadata = yaml.safe_load(yaml_text)
+    metadata = yaml.safe_load(yaml_text) or {}
+
+    guest = metadata.get("guest")
+
+    if not guest:
+        raise ValueError(f"Missing required guest metadata in {file_path}")
+
+    title = metadata.get("title") or extract_markdown_title(transcript)
+
+    if not title:
+        title = file_path.parent.name.replace("-", " ").replace("_", " ").title()
 
     return Episode(
-        guest=metadata["guest"],
-        title=metadata["title"],
+        guest=guest,
+        title=title,
         publish_date=metadata.get("publish_date"),
         youtube_url=metadata.get("youtube_url"),
         video_id=metadata.get("video_id"),
