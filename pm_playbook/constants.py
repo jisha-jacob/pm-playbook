@@ -96,7 +96,12 @@ SPEAKER_PATTERN_HHMM = r"^([A-Za-z\s\-\']+)\s*\((\d{2}:\d{2})\):\s*(.*)$"
 
 # Example:
 # Brian Chesky: Hello everyone...
-SPEAKER_PATTERN_NAME_ONLY = r"^([A-Z][a-zA-Z\s\-\']+):\s*(.*)$"
+SPEAKER_PATTERN_NAME_ONLY = (
+    r"^("
+    r"[A-Z][A-Za-z.'\-]*"
+    r"(?:\s+(?:[A-Z][A-Za-z.'\-]*|and|&|\+)){0,5}"
+    r"):\s*(.*)$"
+)
 
 # Continuation line:
 # (00:03:45): Continued discussion...

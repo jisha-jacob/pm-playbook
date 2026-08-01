@@ -33,6 +33,26 @@ def extract_markdown_title(transcript: str) -> str | None:
     return None
 
 
+def clean_transcript_body(transcript: str) -> str:
+    """
+    Remove document-level Markdown headings from the transcript body.
+    """
+    cleaned_lines: list[str] = []
+
+    for line in transcript.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith("# "):
+            continue
+
+        if stripped.casefold() == "## transcript":
+            continue
+
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
+
 def parse_transcript(file_path: str | Path) -> Episode:
     """
     Parse a transcript markdown file into an Episode object.
@@ -62,6 +82,7 @@ def parse_transcript(file_path: str | Path) -> Episode:
 
     yaml_text = parts[1]
     transcript = parts[2].strip()
+    transcript = clean_transcript_body(transcript)
 
     metadata = yaml.safe_load(yaml_text) or {}
 
