@@ -4,10 +4,11 @@ Corpus-level ingestion pipeline for PM Playbook.
 This module:
 
 1. Discovers transcript Markdown files.
-2. Parses each transcript into an Episode.
-3. Converts each Episode into retrieval-ready Chunk objects.
-4. Validates the generated chunks.
-5. Writes the complete corpus to a Parquet file.
+2. Excludes known invalid or mismatched source files.
+3. Parses each transcript into an Episode.
+4. Converts each Episode into retrieval-ready Chunk objects.
+5. Validates the generated chunks.
+6. Writes the complete corpus to a Parquet file.
 
 Sponsor chunks are preserved in the output and identified using the
 ``is_sponsor_read`` field. They can be excluded later when building
@@ -50,10 +51,22 @@ from pm_playbook.utils import generate_episode_id
 
 DEFAULT_TRANSCRIPTS_DIR = Path("data/raw/transcripts/episodes")
 
+# These files are excluded from ingestion because their metadata and
+# transcript contents are known to describe different episodes.
+#
+# The transcript dataset is a read-only Git submodule, so exclusions are
+# maintained in this repository instead of modifying upstream files.
+EXCLUDED_TRANSCRIPTS = {
+    Path("data/raw/transcripts/episodes/julian-shapiro/transcript.md").resolve(),
+}
+
 
 @dataclass
 class IngestionResult:
+    """Summary statistics for a completed ingestion run."""
+
     transcript_files_found: int
+    transcript_files_excluded: int
     transcript_files_selected: int
     episodes_processed: int
     episodes_failed: int
@@ -66,9 +79,12 @@ class IngestionResult:
 
 def discover_transcript_files(
     transcripts_dir: str | Path,
-) -> list[Path]:
+) -> tuple[list[Path], list[Path]]:
     """
-    Find transcript.md files in the configured episodes directory.
+    Find valid transcript.md files in the configured episodes directory.
+
+    Files listed in ``EXCLUDED_TRANSCRIPTS`` are omitted from the returned
+    transcript list.
 
     Parameters
     ----------
@@ -77,13 +93,17 @@ def discover_transcript_files(
 
     Returns
     -------
-    list[Path]
-        Transcript paths sorted deterministically.
+    tuple[list[Path], list[Path]]
+        A tuple containing:
+
+        1. Valid transcript paths sorted deterministically.
+        2. Excluded transcript paths that were found in the dataset.
 
     Raises
     ------
     FileNotFoundError
-        If the directory does not exist or contains no transcript files.
+        If the directory does not exist or contains no usable transcript
+        files.
     NotADirectoryError
         If the supplied path is not a directory.
     """
@@ -99,16 +119,34 @@ def discover_transcript_files(
     if not directory.is_dir():
         raise NotADirectoryError(f"Transcript path is not a directory: {directory}")
 
-    transcript_files = sorted(directory.glob("*/transcript.md"))
+    discovered_files = sorted(directory.glob("*/transcript.md"))
 
-    if not transcript_files:
+    if not discovered_files:
         raise FileNotFoundError(
             f"No transcript.md files were found under {directory}.\n"
             "Try running:\n"
             "  git submodule update --init --recursive"
         )
 
-    return transcript_files
+    transcript_files: list[Path] = []
+    excluded_files: list[Path] = []
+
+    for transcript_path in discovered_files:
+        resolved_path = transcript_path.resolve()
+
+        if resolved_path in EXCLUDED_TRANSCRIPTS:
+            excluded_files.append(transcript_path)
+            continue
+
+        transcript_files.append(transcript_path)
+
+    if not transcript_files:
+        raise FileNotFoundError(
+            f"No usable transcript.md files were found under {directory}. "
+            "Every discovered transcript was excluded."
+        )
+
+    return transcript_files, excluded_files
 
 
 def validate_chunks(
@@ -372,11 +410,11 @@ def ingest_corpus(
     """
     started_at = perf_counter()
 
-    transcript_files = discover_transcript_files(
+    transcript_files, excluded_files = discover_transcript_files(
         transcripts_dir=transcripts_dir,
     )
 
-    total_files_found = len(transcript_files)
+    total_files_found = len(transcript_files) + len(excluded_files)
 
     if limit is not None:
         if limit < 1:
@@ -395,6 +433,12 @@ def ingest_corpus(
     sponsor_chunks_detected = 0
 
     print(f"Found {total_files_found} transcript files.")
+
+    if excluded_files:
+        print(f"Excluded {len(excluded_files)} known invalid transcript file(s):")
+
+        for excluded_path in excluded_files:
+            print(f"  - {excluded_path}")
 
     if limit is not None:
         print(
@@ -427,6 +471,7 @@ def ingest_corpus(
                 continue
 
             seen_episode_ids.add(episode_id)
+
             episode_chunks = create_chunks(
                 episode=episode,
                 starting_chunk_index=len(all_chunks),
@@ -435,7 +480,9 @@ def ingest_corpus(
             sponsor_count = sum(chunk.is_sponsor_read for chunk in episode_chunks)
 
             sponsor_chunks_detected += sponsor_count
+
             all_chunks.extend(episode_chunks)
+
             episodes_processed += 1
 
             print(
@@ -458,6 +505,7 @@ def ingest_corpus(
                 f"[{file_number}/{len(selected_files)}] FAILED: {transcript_path}",
                 file=sys.stderr,
             )
+
             print(
                 f"  {type(error).__name__}: {error}",
                 file=sys.stderr,
@@ -482,6 +530,7 @@ def ingest_corpus(
 
     result = IngestionResult(
         transcript_files_found=total_files_found,
+        transcript_files_excluded=len(excluded_files),
         transcript_files_selected=len(selected_files),
         episodes_processed=episodes_processed,
         episodes_failed=episodes_failed,
@@ -500,29 +549,37 @@ def ingest_corpus(
 def print_ingestion_summary(
     result: IngestionResult,
 ) -> None:
-    """
-    Print a readable summary of an ingestion run.
-    """
+    """Print a readable summary of an ingestion run."""
     print()
     print("=" * 60)
     print("INGESTION COMPLETE")
     print("=" * 60)
+
     print(f"Transcript files found:    {result.transcript_files_found}")
+
+    print(f"Transcript files excluded: {result.transcript_files_excluded}")
+
     print(f"Transcript files selected: {result.transcript_files_selected}")
+
     print(f"Episodes processed:        {result.episodes_processed}")
+
     print(f"Episodes failed:           {result.episodes_failed}")
+
     print(f"Episodes skipped:          {result.episodes_skipped}")
+
     print(f"Chunks written:            {result.chunks_created}")
+
     print(f"Sponsor chunks flagged:    {result.sponsor_chunks}")
+
     print(f"Output:                    {result.output_path}")
+
     print(f"Elapsed time:              {result.elapsed_seconds:.2f} seconds")
+
     print("=" * 60)
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    """
-    Build the command-line argument parser.
-    """
+    """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(
         description=(
             "Parse Lenny's Podcast transcripts and create "
@@ -563,9 +620,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """
-    Command-line entry point.
-    """
+    """Command-line entry point."""
     argument_parser = build_argument_parser()
     arguments = argument_parser.parse_args()
 
@@ -586,6 +641,7 @@ def main() -> None:
             f"Ingestion failed: {error}",
             file=sys.stderr,
         )
+
         raise SystemExit(1) from error
 
 
