@@ -22,10 +22,12 @@ dependencies = [
     "sqlalchemy>=2.0.51",
     "streamlit>=1.60.0",
     "tiktoken>=0.13.0",
+    "tqdm>=4.69.0",
 ]
 
 [dependency-groups]
 dev = [
+    "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
     "pytest>=9.1.1",
     "ruff>=0.15.22",

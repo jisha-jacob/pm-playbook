@@ -2211,10 +2211,12 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "streamlit" },
     { name = "tiktoken" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "ipykernel" },
     { name = "jupyter" },
     { name = "pytest" },
     { name = "ruff" },
@@ -2239,10 +2241,12 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0.51" },
     { name = "streamlit", specifier = ">=1.60.0" },
     { name = "tiktoken", specifier = ">=0.13.0" },
+    { name = "tqdm", specifier = ">=4.69.0" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.15.22" },

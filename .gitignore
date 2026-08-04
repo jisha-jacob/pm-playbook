@@ -10,3 +10,5 @@ data/chunks-quality-test.parquet
 
 # Evaluation checkpoints
 data/evaluation/ground-truth-checkpoint.jsonl
+
+data/evaluation/*checkpoint*.jsonl
