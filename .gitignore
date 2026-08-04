@@ -7,3 +7,6 @@ __pycache__/
 # Temporary ingestion outputs
 data/chunks-smoke-test.parquet
 data/chunks-quality-test.parquet
+
+# Evaluation checkpoints
+data/evaluation/ground-truth-checkpoint.jsonl
