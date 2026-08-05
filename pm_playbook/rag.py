@@ -1,11 +1,11 @@
 """
-Baseline retrieval-augmented generation flow for PM Playbook.
+Hybrid retrieval-augmented generation flow for PM Playbook.
 
 Pipeline:
     user question
-        -> retrieve relevant transcript chunks
-        -> prioritize guest-spoken excerpts
-        -> build grounded context
+        -> retrieve relevant transcript chunks using hybrid RRF search
+        -> prioritize guest-spoken evidence from the strongest episode
+        -> build speaker-aware grounded context
         -> call OpenAI
         -> return answer, sources, usage, and latency
 """
@@ -23,6 +23,7 @@ from openai import OpenAI, OpenAIError
 
 from pm_playbook.search import (
     DEFAULT_CHUNKS_PATH,
+    PMPlaybookHybridSearch,
     PMPlaybookSearch,
     SearchResult,
     format_timestamp,
@@ -131,12 +132,12 @@ class RAGResult:
 
 
 class PMPlaybookRAG:
-    """Baseline RAG service using Minsearch and OpenAI."""
+    """Grounded RAG service using hybrid retrieval and OpenAI."""
 
     def __init__(
         self,
         *,
-        search_engine: PMPlaybookSearch | None = None,
+        search_engine: PMPlaybookSearch | PMPlaybookHybridSearch | None = None,
         client: OpenAI | None = None,
         model: str = DEFAULT_MODEL,
         chunks_path: str | Path = DEFAULT_CHUNKS_PATH,
@@ -149,7 +150,8 @@ class PMPlaybookRAG:
         Parameters
         ----------
         search_engine:
-            Optional prebuilt search engine.
+            Optional prebuilt text or hybrid search engine. When omitted,
+            hybrid RRF retrieval is used.
         client:
             Optional OpenAI client.
         model:
@@ -173,7 +175,7 @@ class PMPlaybookRAG:
         self.num_results = num_results
         self.max_context_characters = max_context_characters
 
-        self.search_engine = search_engine or PMPlaybookSearch(
+        self.search_engine = search_engine or PMPlaybookHybridSearch(
             chunks_path=chunks_path,
             exclude_sponsors=True,
         )
@@ -194,16 +196,31 @@ class PMPlaybookRAG:
     @staticmethod
     def select_retrieval_results(
         retrieved_chunks: list[SearchResult],
+        *,
         num_results: int,
     ) -> list[SearchResult]:
         """
-        Prefer excerpts spoken by the episode guest.
+        Select grounded sources while preserving hybrid relevance.
 
-        Host questions and summaries can provide useful context, but
-        they should not displace the guest's own statements when enough
-        guest-spoken excerpts are available.
+        The highest-ranked result establishes the primary episode. When that
+        episode already provides at least three guest-spoken excerpts, only
+        those excerpts are used. This avoids padding a strong answer with
+        tangential material from weaker episodes.
+
+        When the primary episode has fewer than three guest-spoken excerpts,
+        other guest-spoken results are added in hybrid rank order. Host or
+        other-speaker excerpts are used only as a final fallback.
         """
-        guest_spoken: list[SearchResult] = []
+        if num_results < 1:
+            raise ValueError("num_results must be at least 1.")
+
+        if not retrieved_chunks:
+            return []
+
+        primary_episode_id = retrieved_chunks[0].episode_id
+
+        primary_guest_spoken: list[SearchResult] = []
+        other_guest_spoken: list[SearchResult] = []
         other_speakers: list[SearchResult] = []
 
         for result in retrieved_chunks:
@@ -212,18 +229,19 @@ class PMPlaybookRAG:
                 == result.guest.strip().casefold()
             )
 
-            if speaker_matches_guest:
-                guest_spoken.append(result)
+            if speaker_matches_guest and result.episode_id == primary_episode_id:
+                primary_guest_spoken.append(result)
+            elif speaker_matches_guest:
+                other_guest_spoken.append(result)
             else:
                 other_speakers.append(result)
 
-        selected = guest_spoken[:num_results]
-        remaining_slots = num_results - len(selected)
+        if len(primary_guest_spoken) >= 3:
+            return primary_guest_spoken[:num_results]
 
-        if remaining_slots > 0:
-            selected.extend(other_speakers[:remaining_slots])
+        selected = primary_guest_spoken + other_guest_spoken + other_speakers
 
-        return selected
+        return selected[:num_results]
 
     def answer(
         self,
@@ -236,9 +254,9 @@ class PMPlaybookRAG:
         """
         Retrieve transcript chunks and generate a grounded answer.
 
-        More candidates are retrieved than ultimately used so that
-        guest-spoken excerpts can be prioritized over host questions
-        and summaries.
+        Hybrid retrieval supplies an expanded candidate set. Source selection
+        prioritizes guest-spoken excerpts from the strongest matching episode,
+        then preserves hybrid rank among the remaining guest-spoken evidence.
         """
         cleaned_question = question.strip()
 
@@ -262,7 +280,7 @@ class PMPlaybookRAG:
         )
 
         retrieved_chunks = self.select_retrieval_results(
-            retrieved_chunks=retrieved_candidates,
+            retrieved_candidates,
             num_results=requested_results,
         )
 
@@ -379,10 +397,7 @@ class PMPlaybookRAG:
         """Convert search results into numbered source objects."""
         sources: list[Source] = []
 
-        for index, result in enumerate(
-            retrieved_chunks,
-            start=1,
-        ):
+        for index, result in enumerate(retrieved_chunks, start=1):
             source = Source(
                 source_number=index,
                 chunk_id=result.chunk_id,
@@ -419,7 +434,6 @@ class PMPlaybookRAG:
             return 0, 0, 0
 
         input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-
         output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
 
         total_tokens = int(
@@ -476,7 +490,7 @@ def print_rag_result(result: RAGResult) -> None:
 
 
 def main() -> None:
-    """Run an end-to-end RAG smoke test."""
+    """Run an end-to-end hybrid RAG smoke test."""
     question = "How do I know if I have product-market fit?"
 
     rag = PMPlaybookRAG()

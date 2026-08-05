@@ -1,24 +1,43 @@
 """
-Text retrieval for PM Playbook.
+Text and hybrid retrieval for PM Playbook.
 
-This module loads the processed transcript chunks from Parquet,
-builds a Minsearch TF-IDF index, and exposes a reusable search API.
+This module loads processed transcript chunks from Parquet and exposes:
 
-The baseline retrieval approach intentionally excludes chunks that
-were flagged as sponsor or promotional content during ingestion.
+1. PMPlaybookSearch
+   Minsearch TF-IDF text retrieval.
+
+2. PMPlaybookHybridSearch
+   Minsearch text retrieval combined with SentenceTransformer vector
+   retrieval using Reciprocal Rank Fusion.
+
+Sponsor/promotional chunks and fragments shorter than 20 words are excluded
+from the searchable corpus by default.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from minsearch import Index
+from sentence_transformers import SentenceTransformer
 
 
 DEFAULT_CHUNKS_PATH = Path("data/chunks.parquet")
+
+DEFAULT_EMBEDDINGS_PATH = Path("data/embeddings/all-MiniLM-L6-v2-text-embeddings.npy")
+DEFAULT_EMBEDDING_CHUNK_IDS_PATH = Path(
+    "data/embeddings/all-MiniLM-L6-v2-text-chunk-ids.json"
+)
+DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+DEFAULT_TEXT_CANDIDATES = 20
+DEFAULT_VECTOR_CANDIDATES = 20
+DEFAULT_RRF_K = 60
 
 TEXT_FIELDS = [
     "text",
@@ -49,8 +68,8 @@ class SearchResult:
     """
     One normalized retrieval result.
 
-    Minsearch returns dictionaries. This model gives the rest of the
-    application a stable, explicit result structure.
+    This model gives the rest of the application a stable result structure
+    regardless of whether text or hybrid retrieval produced the result.
     """
 
     chunk_id: str
@@ -109,10 +128,10 @@ class PMPlaybookSearch:
 
     def load_documents(self) -> list[dict[str, Any]]:
         """
-        Load retrieval documents from the Parquet artifact.
+        Load searchable documents from the Parquet artifact.
 
-        Sponsor/promotional chunks are excluded by default, but they remain
-        available in the source Parquet file for inspection and evaluation.
+        Sponsor/promotional chunks are excluded by default, but remain in the
+        source Parquet file for inspection and evaluation.
         """
         if not self.chunks_path.exists():
             raise FileNotFoundError(
@@ -186,7 +205,7 @@ class PMPlaybookSearch:
 
     def ensure_ready(self) -> None:
         """
-        Lazily initialize documents and the index.
+        Lazily initialize documents and the Minsearch index.
         """
         if self.index is None:
             self.build_index()
@@ -202,24 +221,6 @@ class PMPlaybookSearch:
     ) -> list[SearchResult]:
         """
         Search transcript chunks using TF-IDF similarity.
-
-        Parameters
-        ----------
-        query:
-            Natural-language user query.
-        num_results:
-            Maximum number of results to return.
-        guest:
-            Optional exact guest filter.
-        speaker_name:
-            Optional exact speaker filter.
-        boost_dict:
-            Optional Minsearch field boosts. Defaults to DEFAULT_BOOSTS.
-
-        Returns
-        -------
-        list[SearchResult]
-            Ranked retrieval results.
         """
         cleaned_query = query.strip()
 
@@ -254,10 +255,14 @@ class PMPlaybookSearch:
     @staticmethod
     def _normalize_result(
         result: dict[str, Any],
+        *,
+        score: float | None = None,
     ) -> SearchResult:
         """
-        Convert one Minsearch result dictionary into SearchResult.
+        Convert one retrieval dictionary into SearchResult.
         """
+        normalized_score = score if score is not None else _extract_score(result)
+
         return SearchResult(
             chunk_id=str(result["chunk_id"]),
             episode_id=str(result["episode_id"]),
@@ -272,8 +277,286 @@ class PMPlaybookSearch:
             end_time=_optional_int(result.get("end_time")),
             chunk_position=int(result["chunk_position"]),
             word_count=int(result["word_count"]),
-            score=_extract_score(result),
+            score=normalized_score,
         )
+
+
+class PMPlaybookHybridSearch:
+    """
+    Hybrid retrieval using text search, vector search, and RRF.
+
+    This implementation uses the production configuration selected during
+    Phase 3B evaluation:
+
+    - Minsearch text candidates: 20
+    - SentenceTransformer vector candidates: 20
+    - Embedding model: all-MiniLM-L6-v2
+    - Reciprocal Rank Fusion constant: 60
+    """
+
+    def __init__(
+        self,
+        chunks_path: str | Path = DEFAULT_CHUNKS_PATH,
+        embeddings_path: str | Path = DEFAULT_EMBEDDINGS_PATH,
+        embedding_chunk_ids_path: str | Path = DEFAULT_EMBEDDING_CHUNK_IDS_PATH,
+        *,
+        embedding_model_name: str = DEFAULT_EMBEDDING_MODEL,
+        exclude_sponsors: bool = True,
+    ) -> None:
+        self.text_search = PMPlaybookSearch(
+            chunks_path=chunks_path,
+            exclude_sponsors=exclude_sponsors,
+        )
+
+        self.embeddings_path = Path(embeddings_path)
+        self.embedding_chunk_ids_path = Path(embedding_chunk_ids_path)
+        self.embedding_model_name = embedding_model_name
+
+        self.embedding_model: SentenceTransformer | None = None
+        self.document_embeddings: np.ndarray | None = None
+        self.embedding_chunk_ids: list[str] = []
+
+        self.documents_by_chunk_id: dict[str, dict[str, Any]] = {}
+        self.embedding_index_by_chunk_id: dict[str, int] = {}
+
+    def load_vector_artifacts(self) -> None:
+        """
+        Load the saved embedding matrix and aligned chunk-ID list.
+        """
+        if not self.embeddings_path.exists():
+            raise FileNotFoundError(
+                f"Embedding file does not exist: {self.embeddings_path}\n"
+                "Generate it with:\n"
+                "  uv run python scripts/build_embeddings.py"
+            )
+
+        if not self.embedding_chunk_ids_path.exists():
+            raise FileNotFoundError(
+                "Embedding chunk-ID file does not exist: "
+                f"{self.embedding_chunk_ids_path}\n"
+                "Generate it with:\n"
+                "  uv run python scripts/build_embeddings.py"
+            )
+
+        self.document_embeddings = np.load(
+            self.embeddings_path,
+            mmap_mode="r",
+        )
+
+        with self.embedding_chunk_ids_path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            raw_chunk_ids = json.load(file)
+
+        if not isinstance(raw_chunk_ids, list):
+            raise ValueError("Embedding chunk-ID artifact must contain a JSON list.")
+
+        self.embedding_chunk_ids = [str(chunk_id) for chunk_id in raw_chunk_ids]
+
+        if self.document_embeddings.ndim != 2:
+            raise ValueError(
+                "Embedding matrix must be two-dimensional. "
+                f"Received shape: {self.document_embeddings.shape}"
+            )
+
+        if self.document_embeddings.shape[0] != len(self.embedding_chunk_ids):
+            raise ValueError(
+                "Embedding matrix and chunk-ID artifact are misaligned: "
+                f"{self.document_embeddings.shape[0]} embedding rows versus "
+                f"{len(self.embedding_chunk_ids)} chunk IDs."
+            )
+
+        if len(set(self.embedding_chunk_ids)) != len(self.embedding_chunk_ids):
+            raise ValueError(
+                "Embedding chunk-ID artifact contains duplicate chunk IDs."
+            )
+
+        self.embedding_index_by_chunk_id = {
+            chunk_id: index for index, chunk_id in enumerate(self.embedding_chunk_ids)
+        }
+
+    def ensure_ready(self) -> None:
+        """
+        Lazily initialize text retrieval, vector artifacts, and the model.
+        """
+        self.text_search.ensure_ready()
+
+        if not self.documents_by_chunk_id:
+            self.documents_by_chunk_id = {
+                str(document["chunk_id"]): document
+                for document in self.text_search.documents
+            }
+
+        if self.document_embeddings is None:
+            self.load_vector_artifacts()
+
+        if self.embedding_model is None:
+            self.embedding_model = SentenceTransformer(self.embedding_model_name)
+
+        missing_document_ids = [
+            chunk_id
+            for chunk_id in self.embedding_chunk_ids
+            if chunk_id not in self.documents_by_chunk_id
+        ]
+
+        if missing_document_ids:
+            preview = missing_document_ids[:5]
+
+            raise ValueError(
+                "Some embedding chunk IDs are missing from the searchable "
+                f"document corpus. Example IDs: {preview}"
+            )
+
+    def search(
+        self,
+        query: str,
+        *,
+        num_results: int = 5,
+        guest: str | None = None,
+        speaker_name: str | None = None,
+        boost_dict: dict[str, float] | None = None,
+        text_candidates: int = DEFAULT_TEXT_CANDIDATES,
+        vector_candidates: int = DEFAULT_VECTOR_CANDIDATES,
+        rrf_k: int = DEFAULT_RRF_K,
+    ) -> list[SearchResult]:
+        """
+        Search transcript chunks using hybrid RRF retrieval.
+        """
+        cleaned_query = query.strip()
+
+        if not cleaned_query:
+            raise ValueError("query cannot be empty.")
+
+        if num_results < 1:
+            raise ValueError("num_results must be at least 1.")
+
+        if text_candidates < 1:
+            raise ValueError("text_candidates must be at least 1.")
+
+        if vector_candidates < 1:
+            raise ValueError("vector_candidates must be at least 1.")
+
+        if rrf_k < 1:
+            raise ValueError("rrf_k must be at least 1.")
+
+        self.ensure_ready()
+
+        if self.embedding_model is None:
+            raise RuntimeError("Embedding model was not initialized.")
+
+        if self.document_embeddings is None:
+            raise RuntimeError("Document embeddings were not loaded.")
+
+        effective_text_candidates = max(
+            text_candidates,
+            num_results,
+        )
+        effective_vector_candidates = max(
+            vector_candidates,
+            num_results,
+        )
+
+        text_results = self.text_search.search(
+            cleaned_query,
+            num_results=effective_text_candidates,
+            guest=guest,
+            speaker_name=speaker_name,
+            boost_dict=boost_dict,
+        )
+
+        text_chunk_ids = [result.chunk_id for result in text_results]
+
+        query_embedding = self.embedding_model.encode(
+            [cleaned_query],
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )[0]
+
+        vector_chunk_ids = self._vector_search_chunk_ids(
+            query_embedding,
+            num_results=effective_vector_candidates,
+            guest=guest,
+            speaker_name=speaker_name,
+        )
+
+        fused_chunk_ids, fused_scores = reciprocal_rank_fusion_with_scores(
+            text_chunk_ids,
+            vector_chunk_ids,
+            rrf_k=rrf_k,
+            limit=num_results,
+        )
+
+        results: list[SearchResult] = []
+
+        for chunk_id in fused_chunk_ids:
+            document = self.documents_by_chunk_id.get(chunk_id)
+
+            if document is None:
+                continue
+
+            results.append(
+                PMPlaybookSearch._normalize_result(
+                    document,
+                    score=fused_scores[chunk_id],
+                )
+            )
+
+        return results
+
+    def _vector_search_chunk_ids(
+        self,
+        query_embedding: np.ndarray,
+        *,
+        num_results: int,
+        guest: str | None,
+        speaker_name: str | None,
+    ) -> list[str]:
+        """
+        Return vector-ranked chunk IDs with optional exact metadata filters.
+        """
+        if self.document_embeddings is None:
+            raise RuntimeError("Document embeddings were not loaded.")
+
+        scores = self.document_embeddings @ query_embedding
+
+        eligible_indices: list[int] = []
+
+        for index, chunk_id in enumerate(self.embedding_chunk_ids):
+            document = self.documents_by_chunk_id[chunk_id]
+
+            if guest and str(document["guest"]) != guest:
+                continue
+
+            if speaker_name and str(document["speaker_name"]) != speaker_name:
+                continue
+
+            eligible_indices.append(index)
+
+        if not eligible_indices:
+            return []
+
+        eligible_indices_array = np.asarray(
+            eligible_indices,
+            dtype=np.int64,
+        )
+        eligible_scores = scores[eligible_indices_array]
+
+        result_count = min(
+            num_results,
+            len(eligible_indices),
+        )
+
+        ranked_local_indices = np.argsort(
+            eligible_scores,
+        )[::-1][:result_count]
+
+        ranked_embedding_indices = eligible_indices_array[ranked_local_indices]
+
+        return [
+            self.embedding_chunk_ids[int(index)] for index in ranked_embedding_indices
+        ]
 
 
 def _optional_string(value: Any) -> str | None:
@@ -304,10 +587,10 @@ def _extract_score(
     result: dict[str, Any],
 ) -> float | None:
     """
-    Extract a relevance score when exposed by the installed Minsearch version.
+    Extract a relevance score when exposed by Minsearch.
 
-    Minsearch result dictionaries may not always include a public score field,
-    so score remains optional.
+    Minsearch result dictionaries may not include a public score field,
+    so the score remains optional.
     """
     for key in ("score", "_score", "relevance_score"):
         value = result.get(key)
@@ -316,6 +599,70 @@ def _extract_score(
             return float(value)
 
     return None
+
+
+def reciprocal_rank_fusion_with_scores(
+    text_chunk_ids: list[str],
+    vector_chunk_ids: list[str],
+    *,
+    rrf_k: int = DEFAULT_RRF_K,
+    limit: int = 5,
+) -> tuple[list[str], dict[str, float]]:
+    """
+    Combine two ranked chunk-ID lists using Reciprocal Rank Fusion.
+
+    Returns both the ranked IDs and their fused scores.
+    """
+    if rrf_k < 1:
+        raise ValueError("rrf_k must be at least 1.")
+
+    if limit < 1:
+        raise ValueError("limit must be at least 1.")
+
+    fused_scores: dict[str, float] = {}
+
+    for ranked_chunk_ids in (
+        text_chunk_ids,
+        vector_chunk_ids,
+    ):
+        for rank, chunk_id in enumerate(
+            ranked_chunk_ids,
+            start=1,
+        ):
+            fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (
+                rrf_k + rank
+            )
+
+    ranked_chunk_ids = sorted(
+        fused_scores,
+        key=lambda chunk_id: (
+            fused_scores[chunk_id],
+            chunk_id,
+        ),
+        reverse=True,
+    )
+
+    return ranked_chunk_ids[:limit], fused_scores
+
+
+def reciprocal_rank_fusion(
+    text_chunk_ids: list[str],
+    vector_chunk_ids: list[str],
+    *,
+    rrf_k: int = DEFAULT_RRF_K,
+    limit: int = 5,
+) -> list[str]:
+    """
+    Combine two ranked chunk-ID lists using Reciprocal Rank Fusion.
+    """
+    ranked_chunk_ids, _ = reciprocal_rank_fusion_with_scores(
+        text_chunk_ids,
+        vector_chunk_ids,
+        rrf_k=rrf_k,
+        limit=limit,
+    )
+
+    return ranked_chunk_ids
 
 
 def format_timestamp(seconds: int | None) -> str | None:
@@ -340,10 +687,10 @@ def search_documents(
     chunks_path: str | Path = DEFAULT_CHUNKS_PATH,
 ) -> list[dict[str, Any]]:
     """
-    Convenience function for scripts and notebooks.
+    Convenience function for baseline text search.
 
-    For repeated application queries, instantiate PMPlaybookSearch once
-    instead of rebuilding the index for every call.
+    For repeated queries, instantiate PMPlaybookSearch once rather than
+    rebuilding the index for every call.
     """
     search_engine = PMPlaybookSearch(
         chunks_path=chunks_path,
@@ -359,13 +706,46 @@ def search_documents(
     return [result.to_dict() for result in results]
 
 
+def hybrid_search_documents(
+    query: str,
+    *,
+    num_results: int = 5,
+    guest: str | None = None,
+    speaker_name: str | None = None,
+    chunks_path: str | Path = DEFAULT_CHUNKS_PATH,
+    embeddings_path: str | Path = DEFAULT_EMBEDDINGS_PATH,
+    embedding_chunk_ids_path: str | Path = DEFAULT_EMBEDDING_CHUNK_IDS_PATH,
+) -> list[dict[str, Any]]:
+    """
+    Convenience function for hybrid retrieval.
+
+    For an application, instantiate PMPlaybookHybridSearch once so the index,
+    embedding matrix, and model are reused across queries.
+    """
+    search_engine = PMPlaybookHybridSearch(
+        chunks_path=chunks_path,
+        embeddings_path=embeddings_path,
+        embedding_chunk_ids_path=embedding_chunk_ids_path,
+    )
+
+    results = search_engine.search(
+        query=query,
+        num_results=num_results,
+        guest=guest,
+        speaker_name=speaker_name,
+    )
+
+    return [result.to_dict() for result in results]
+
+
 def main() -> None:
     """
-    Run a small command-line smoke test.
+    Run a hybrid-retrieval command-line smoke test.
     """
     query = "How do I know if I have product-market fit?"
 
-    search_engine = PMPlaybookSearch()
+    search_engine = PMPlaybookHybridSearch()
+
     results = search_engine.search(
         query=query,
         num_results=5,
@@ -388,6 +768,7 @@ def main() -> None:
         print(f"Speaker: {result.speaker_name}")
         print(f"Timestamp: {timestamp or 'Unknown'}")
         print(f"Chunk ID: {result.chunk_id}")
+        print(f"RRF score: {result.score}")
         print(f"Words: {result.word_count}")
         print()
         print(result.text[:800])
