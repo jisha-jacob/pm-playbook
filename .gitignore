@@ -12,3 +12,10 @@ data/chunks-quality-test.parquet
 data/evaluation/ground-truth-checkpoint.jsonl
 
 data/evaluation/*checkpoint*.jsonl
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Generated embedding artifacts
+data/embeddings/
