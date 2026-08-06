@@ -3,22 +3,23 @@ services:
     image: postgres:16
     container_name: pm-playbook-postgres
     environment:
-      POSTGRES_DB: pm_playbook
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-pm_playbook}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pm_playbook_postgres_data:/var/lib/postgresql/data
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U postgres -d pm_playbook",
+          "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-pm_playbook}",
         ]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
 volumes:
   pm_playbook_postgres_data:
