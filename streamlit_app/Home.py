@@ -31,6 +31,13 @@ save_conversation = db_module.save_conversation
 save_feedback = db_module.save_feedback
 
 
+SAMPLE_QUESTIONS = [
+    "How do I find product-market fit?",
+    "How should I prioritize my roadmap?",
+    "How can I improve retention?",
+]
+
+
 st.set_page_config(
     page_title="PM Playbook",
     page_icon="📘",
@@ -210,51 +217,31 @@ def render_chat_history() -> None:
                 st.markdown(message["content"])
 
 
-def main() -> None:
-    """Render the PM Playbook Streamlit application."""
-    initialize_session_state()
+def render_sample_questions() -> str | None:
+    """
+    Render compact clickable example questions.
 
-    try:
-        initialize_database()
-    except Exception as error:
-        st.error(
-            "The PostgreSQL database is unavailable. "
-            "Start it with `docker compose up -d postgres`."
-        )
-        st.exception(error)
-        st.stop()
+    Returns the selected question when a button is clicked.
+    """
+    selected_question: str | None = None
 
-    st.title("📘 PM Playbook")
-    st.caption(
-        "Ask product-management questions and get answers grounded "
-        "in Lenny's Podcast transcripts."
-    )
+    with st.container(border=True):
+        columns = st.columns(len(SAMPLE_QUESTIONS))
 
-    with st.sidebar:
-        st.header("About")
-        st.write(
-            "PM Playbook uses hybrid text and vector retrieval, "
-            "Reciprocal Rank Fusion, and GPT-4o mini."
-        )
-        st.write(
-            "Answers are limited to the retrieved podcast excerpts "
-            "and include their supporting sources."
-        )
+        for index, sample_question in enumerate(SAMPLE_QUESTIONS):
+            with columns[index]:
+                if st.button(
+                    sample_question,
+                    key=f"sample-question-{index}",
+                    use_container_width=True,
+                ):
+                    selected_question = sample_question
 
-        if st.button(
-            "Clear conversation",
-            use_container_width=True,
-        ):
-            st.session_state.messages = []
-            st.rerun()
+    return selected_question
 
-    render_chat_history()
 
-    question = st.chat_input("Ask a product-management question...")
-
-    if not question:
-        return
-
+def process_question(question: str) -> None:
+    """Process one user question through the normal chat pipeline."""
     st.session_state.messages.append(
         {
             "role": "user",
@@ -329,6 +316,58 @@ def main() -> None:
             assistant_message,
             message_index=len(st.session_state.messages) - 1,
         )
+
+
+def main() -> None:
+    """Render the PM Playbook Streamlit application."""
+    initialize_session_state()
+
+    try:
+        initialize_database()
+    except Exception as error:
+        st.error(
+            "The PostgreSQL database is unavailable. "
+            "Start it with `docker compose up -d postgres`."
+        )
+        st.exception(error)
+        st.stop()
+
+    st.title("📘 PM Playbook")
+    st.caption(
+        "Ask product-management questions and get answers grounded "
+        "in Lenny's Podcast transcripts."
+    )
+
+    with st.sidebar:
+        st.header("About")
+        st.write(
+            "PM Playbook uses hybrid text and vector retrieval, "
+            "Reciprocal Rank Fusion, and GPT-4o mini."
+        )
+        st.write(
+            "Answers are limited to the retrieved podcast excerpts "
+            "and include their supporting sources."
+        )
+
+        if st.button(
+            "Clear conversation",
+            use_container_width=True,
+        ):
+            st.session_state.messages = []
+            st.rerun()
+
+    selected_sample_question = render_sample_questions()
+
+    render_chat_history()
+
+    typed_question = st.chat_input("Ask a product-management question...")
+
+    question = typed_question or selected_sample_question
+
+    if not question:
+        return
+
+    process_question(question)
 
 
 if __name__ == "__main__":
