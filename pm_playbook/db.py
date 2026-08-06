@@ -3,6 +3,15 @@ PostgreSQL persistence helpers for PM Playbook.
 
 This module stores RAG conversations and user feedback using SQLAlchemy Core.
 It also estimates text-generation cost from model token usage.
+
+Database configuration supports two deployment modes:
+
+1. DATABASE_URL
+   Recommended for cloud deployments such as Streamlit Community Cloud
+   connected to AWS RDS.
+
+2. POSTGRES_* environment variables
+   Used as a fallback for local Docker Compose development.
 """
 
 from __future__ import annotations
@@ -10,6 +19,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import (
     Column,
@@ -26,7 +36,7 @@ from sqlalchemy import (
     insert,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, URL
 
 
 metadata = MetaData()
@@ -83,27 +93,129 @@ feedback = Table(
 )
 
 
-def get_database_url() -> str:
+def _normalize_database_url(database_url: str) -> str:
     """
-    Build the PostgreSQL connection URL from environment variables.
+    Normalize a PostgreSQL URL for SQLAlchemy and psycopg2.
+
+    Some cloud providers expose URLs beginning with ``postgres://`` or
+    ``postgresql://``. The application explicitly uses the psycopg2 driver,
+    so these schemes are converted to ``postgresql+psycopg2://``.
+
+    Existing query parameters, including ``sslmode``, are preserved.
     """
+    database_url = database_url.strip()
+
+    if not database_url:
+        raise ValueError("DATABASE_URL must not be empty.")
+
+    if database_url.startswith("postgres://"):
+        return database_url.replace(
+            "postgres://",
+            "postgresql+psycopg2://",
+            1,
+        )
+
+    if database_url.startswith("postgresql://"):
+        return database_url.replace(
+            "postgresql://",
+            "postgresql+psycopg2://",
+            1,
+        )
+
+    return database_url
+
+
+def _add_sslmode(database_url: str, sslmode: str) -> str:
+    """
+    Add sslmode to a database URL when it is not already present.
+
+    The function preserves any existing URL query parameters. An explicitly
+    configured sslmode in DATABASE_URL takes precedence over POSTGRES_SSLMODE.
+    """
+    parts = urlsplit(database_url)
+    query_items = dict(parse_qsl(parts.query, keep_blank_values=True))
+
+    if "sslmode" not in query_items:
+        query_items["sslmode"] = sslmode
+
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(query_items),
+            parts.fragment,
+        )
+    )
+
+
+def get_database_url() -> str | URL:
+    """
+    Return the PostgreSQL connection URL.
+
+    Configuration precedence:
+
+    1. DATABASE_URL
+    2. POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER,
+       and POSTGRES_PASSWORD
+
+    POSTGRES_SSLMODE is optional. When supplied, it is added to the connection
+    URL unless DATABASE_URL already contains an sslmode parameter.
+    """
+    database_url = os.getenv("DATABASE_URL")
+
+    if database_url:
+        normalized_url = _normalize_database_url(database_url)
+
+        sslmode = os.getenv("POSTGRES_SSLMODE")
+        if sslmode:
+            normalized_url = _add_sslmode(normalized_url, sslmode)
+
+        return normalized_url
+
     host = os.getenv("POSTGRES_HOST", "localhost")
-    port = os.getenv("POSTGRES_PORT", "5432")
+    port_text = os.getenv("POSTGRES_PORT", "5432")
     database = os.getenv("POSTGRES_DB", "pm_playbook")
     user = os.getenv("POSTGRES_USER", "postgres")
     password = os.getenv("POSTGRES_PASSWORD", "postgres")
 
-    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}"
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise ValueError("POSTGRES_PORT must be a valid integer.") from exc
+
+    query: dict[str, str] = {}
+    sslmode = os.getenv("POSTGRES_SSLMODE")
+
+    if sslmode:
+        query["sslmode"] = sslmode
+
+    return URL.create(
+        drivername="postgresql+psycopg2",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=database,
+        query=query,
+    )
 
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
     """
     Create and cache the SQLAlchemy engine.
+
+    pool_pre_ping checks stale pooled connections before use. pool_recycle
+    prevents the application from retaining connections indefinitely, which is
+    useful for hosted Streamlit sessions and managed PostgreSQL services.
     """
     return create_engine(
         get_database_url(),
         pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=2,
+        max_overflow=3,
     )
 
 
