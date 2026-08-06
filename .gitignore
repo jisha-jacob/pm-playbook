@@ -21,3 +21,5 @@ __pycache__/
 data/embeddings/*
 !data/embeddings/all-MiniLM-L6-v2-text-chunk-ids.json
 !data/embeddings/all-MiniLM-L6-v2-text-embeddings.npy
+# AWS RDS certificate bundle
+/global-bundle.pem
