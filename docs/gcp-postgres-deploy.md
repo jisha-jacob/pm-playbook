@@ -274,8 +274,10 @@ to it — nothing about this setup is destructive to the old instance.
 
 ## Decommissioning the old database
 
-Only after the new instance has been live and stable for a few days.
-This is a deliberate, separately-confirmed action — not something to
+The old AWS RDS instance for this project has already been deleted.
+Reference for anyone doing this kind of cutover again: wait until the
+new instance has been live and stable for a few days, and treat deletion
+as a deliberate, separately-confirmed action rather than something to
 bundle into the initial cutover. For AWS RDS:
 
 ```bash
