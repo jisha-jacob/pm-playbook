@@ -8,7 +8,8 @@ Database configuration supports two deployment modes:
 
 1. DATABASE_URL
    Recommended for cloud deployments such as Streamlit Community Cloud
-   connected to AWS RDS.
+   connected to a self-managed PostgreSQL instance (e.g. Google Cloud
+   Compute Engine).
 
 2. POSTGRES_* environment variables
    Used as a fallback for local Docker Compose development.

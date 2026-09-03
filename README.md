@@ -108,7 +108,7 @@ Open the deployed application:
 The public deployment uses:
 
 - **Streamlit Community Cloud** for the application;
-- **AWS RDS for PostgreSQL 16** for conversations, feedback, and telemetry;
+- **self-managed PostgreSQL 16 on a Google Cloud Compute Engine `e2-micro` VM** (Always Free tier) for conversations, feedback, and telemetry;
 - committed retrieval artifacts for reliable cloud startup;
 - the OpenAI Responses API for grounded answer generation.
 
@@ -163,7 +163,7 @@ Streamlit Community Cloud
     |-- OpenAI grounded generation
     |
     v
-AWS RDS PostgreSQL 16
+Google Cloud Compute Engine (e2-micro) / PostgreSQL 16
     |-- conversations
     |-- feedback
     |-- usage telemetry
@@ -514,7 +514,10 @@ DATABASE_URL=postgresql://user:password@host:5432/database
 POSTGRES_SSLMODE=require
 ```
 
-`DATABASE_URL` is primarily intended for hosted databases such as AWS RDS.
+`DATABASE_URL` is primarily intended for a hosted database, such as the
+self-managed PostgreSQL instance on Google Cloud Compute Engine used in
+production. See [docs/gcp-postgres-deploy.md](docs/gcp-postgres-deploy.md)
+for how that instance is provisioned and configured.
 
 ### 4. Start PostgreSQL
 
@@ -696,7 +699,7 @@ pm-playbook/
 | Database access | SQLAlchemy Core |
 | Local infrastructure | Docker Compose |
 | Cloud app hosting | Streamlit Community Cloud |
-| Cloud database | AWS RDS for PostgreSQL |
+| Cloud database | Self-managed PostgreSQL 16 on Google Cloud Compute Engine (`e2-micro`) |
 | Dependency management | uv |
 | Evaluation | Hit Rate, MRR, structured LLM-as-a-judge |
 
@@ -727,7 +730,9 @@ Docker Compose manages the local PostgreSQL dependency. A full application image
 
 ### Hosted application and database are separated
 
-Streamlit Community Cloud hosts the Python application and committed retrieval artifacts. AWS RDS provides managed PostgreSQL persistence. This keeps cloud deployment simple while preserving feedback and monitoring data.
+Streamlit Community Cloud hosts the Python application and committed retrieval artifacts. A self-managed PostgreSQL 16 instance on a Google Cloud Compute Engine `e2-micro` VM (Always Free tier) provides persistence, keeping cloud deployment simple while preserving feedback and monitoring data at no recurring cost.
+
+This trades away what a managed service like RDS provides out of the box: there is no automatic backup, high availability, or failover, and the Postgres port is reachable from any IP since Streamlit Community Cloud has no fixed egress addresses to allowlist — security relies on TLS and `scram-sha-256` auth instead of network restriction. See [docs/gcp-postgres-deploy.md](docs/gcp-postgres-deploy.md) for the full setup and these trade-offs in detail.
 
 ## Limitations
 
@@ -753,7 +758,7 @@ The transcript source is:
 
 The source repository states that the transcripts are for personal and educational use and that the underlying content belongs to Lenny's Podcast and its guests.
 
-This project is an independent educational project created for the DataTalksClub LLM Zoomcamp. It is not affiliated with or endorsed by Lenny's Podcast, its guests, ChatPRD, Streamlit, OpenAI, or AWS.
+This project is an independent educational project created for the DataTalksClub LLM Zoomcamp. It is not affiliated with or endorsed by Lenny's Podcast, its guests, ChatPRD, Streamlit, OpenAI, or Google Cloud.
 
 ---
 
